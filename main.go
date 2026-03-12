@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// --- Types ---
+// --- Types & Tokens ---
 
 type TokenType int
 
@@ -35,7 +35,7 @@ type Rule struct {
 	Declarations []string
 }
 
-// --- Lexer ---
+// --- Lexer (Byte-by-Byte with Unread) ---
 
 type Lexer struct {
 	reader *bufio.Reader
@@ -52,26 +52,24 @@ func (l *Lexer) NextToken() (Token, error) {
 			return Token{}, err
 		}
 
-		switch r {
-		case '{':
-			return Token{TokenOpenBrace, "{"}, nil
-		case '}':
-			return Token{TokenCloseBrace, "}"}, nil
-		case ':':
-			return Token{TokenColon, ":"}, nil
-		case ';':
-			return Token{TokenSemicolon, ";"}, nil
-		case ' ', '\n', '\t', '\r':
-			if sb.Len() > 0 {
-				sb.WriteRune(r)
+		if strings.ContainsRune("{}:;", r) {
+			content := strings.TrimSpace(sb.String())
+			if content != "" {
+				l.reader.UnreadRune()
+				return Token{TokenText, content}, nil
 			}
-		default:
-			sb.WriteRune(r)
-			next, _ := l.reader.Peek(1)
-			if len(next) > 0 && strings.ContainsAny(string(next), "{}:;") {
-				return Token{TokenText, strings.TrimSpace(sb.String())}, nil
+			switch r {
+			case '{':
+				return Token{TokenOpenBrace, "{"}, nil
+			case '}':
+				return Token{TokenCloseBrace, "}"}, nil
+			case ':':
+				return Token{TokenColon, ":"}, nil
+			case ';':
+				return Token{TokenSemicolon, ";"}, nil
 			}
 		}
+		sb.WriteRune(r)
 	}
 }
 
@@ -84,30 +82,37 @@ type PostGo struct {
 
 func (c *PostGo) Process(input io.Reader) {
 	lexer := &Lexer{reader: bufio.NewReader(input)}
-	var currentText string
-	var currentProp string
+	var lastText string
 
 	for {
+		// Note: Ensure lexer is initialized correctly
 		tok, err := lexer.NextToken()
 		if err == io.EOF {
+			break
+		}
+		if err != nil {
 			break
 		}
 
 		switch tok.Type {
 		case TokenText:
-			currentText = tok.Content
+			lastText = tok.Content
 		case TokenOpenBrace:
-			resolved := c.resolveSelector(currentText)
+			resolved := c.resolveSelector(lastText)
 			c.Stack = append(c.Stack, resolved)
-			currentText = ""
+			lastText = ""
 		case TokenColon:
-			currentProp = currentText
-		case TokenSemicolon:
-			c.record(currentProp, currentText)
+			prop := lastText
+			valTok, _ := lexer.NextToken()
+			if valTok.Type == TokenText {
+				c.record(prop, valTok.Content)
+			}
 		case TokenCloseBrace:
 			if len(c.Stack) > 0 {
 				c.Stack = c.Stack[:len(c.Stack)-1]
 			}
+		case TokenSemicolon:
+			lastText = ""
 		}
 	}
 }
@@ -137,7 +142,7 @@ func (c *PostGo) record(prop, val string) {
 	c.FinalAST = append(c.FinalAST, Rule{Selector: sel, Declarations: []string{prop + ": " + val}})
 }
 
-// --- CLI & Runner ---
+// --- CLI Logic ---
 
 func main() {
 	srcDir := flag.String("src", "./src", "Source directory")
@@ -147,8 +152,8 @@ func main() {
 
 	run := func() {
 		engine := &PostGo{}
-		filepath.Walk(*srcDir, func(path string, info os.FileInfo, err error) error {
-			if !info.IsDir() && filepath.Ext(path) == ".css" {
+		err := filepath.Walk(*srcDir, func(path string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() && filepath.Ext(path) == ".css" {
 				f, _ := os.Open(path)
 				defer f.Close()
 				engine.Process(f)
@@ -156,12 +161,17 @@ func main() {
 			return nil
 		})
 
+		if err != nil {
+			log.Printf("Error walking path: %v", err)
+			return
+		}
+
 		outFile, _ := os.Create(*outPath)
 		defer outFile.Close()
 		for _, r := range engine.FinalAST {
 			fmt.Fprintf(outFile, "%s {\n  %s;\n}\n\n", r.Selector, strings.Join(r.Declarations, ";\n  "))
 		}
-		fmt.Println("🚀 Bundle updated!")
+		log.Println("✨ Bundle updated successfully.")
 	}
 
 	run()
@@ -177,7 +187,7 @@ func main() {
 			}
 		}()
 		watcher.Add(*srcDir)
-		fmt.Println("👀 Watching for changes...")
+		log.Printf("👀 Watching for changes in %s...", *srcDir)
 		select {}
 	}
 }
