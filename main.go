@@ -44,6 +44,7 @@ func main() {
 		if err != nil {
 			return err
 		}
+		fmt.Println("help")
 
 		// Skip directories
 		if info.IsDir() {
