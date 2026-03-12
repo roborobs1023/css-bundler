@@ -30,41 +30,58 @@ func main() {
 	}
 	defer out.Close()
 
-	// Walk the directory recursively
+	priorityFile := "index.css" // The file that MUST be first
+
+	// 1. Manually process the priority file first
+	priorityPath := filepath.Join(srcDir, priorityFile)
+	if _, err := os.Stat(priorityPath); err == nil {
+		fmt.Printf("🔝 Priority First: %s\n", priorityPath)
+		appendFile(priorityPath, out)
+	}
+
+	// 2. Walk the directory for everything else
 	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Only process files ending in .css and skip the output file if it's in the same dir
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".css") && info.Name() != outputFile {
-			fmt.Printf("📦 Bundling: %s\n", path)
-
-			// Write a comment header to the bundle for easier debugging
-			header := fmt.Sprintf("\n/* --- Source: %s --- */\n", path)
-			if _, err := out.WriteString(header); err != nil {
-				return err
-			}
-
-			// Open the source CSS file
-			f, err := os.Open(path)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-
-			// Stream the content directly to the output file
-			if _, err := io.Copy(out, f); err != nil {
-				return err
-			}
+		// Skip directories
+		if info.IsDir() {
+			return nil
 		}
+
+		// Conditions to bundle:
+		// - Must be .css
+		// - Must NOT be the output file
+		// - Must NOT be the priority file we already handled
+		isCSS := strings.HasSuffix(info.Name(), ".css")
+		isNotOutput := info.Name() != outputFile
+		isNotPriority := info.Name() != priorityFile
+
+		if isCSS && isNotOutput && isNotPriority {
+			fmt.Printf("📦 Bundling: %s\n", path)
+			return appendFile(path, out)
+		}
+
 		return nil
 	})
 
 	if err != nil {
-		fmt.Printf("Error walking the path: %v\n", err)
-		return
+		fmt.Printf("Walk error: %v\n", err)
 	}
+}
 
-	fmt.Println("\n✨ Success! Your raw CSS is bundled and ready to go.")
+// Helper function to keep the main loop clean
+func appendFile(sourcePath string, destination *os.File) error {
+	f, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	header := fmt.Sprintf("\n/* --- Source: %s --- */\n", sourcePath)
+	destination.WriteString(header)
+
+	_, err = io.Copy(destination, f)
+	return err
 }
